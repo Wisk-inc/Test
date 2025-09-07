@@ -10,7 +10,118 @@
 
 (function() {
     'use strict';
-    const puterScript = document.createElement('script');
+
+    // CONFIGURATION
+    const TOKEN_VALIDATOR_URL = 'https://spectra-token-validator-worker.workers.puter.com/validate'; // TODO: Replace with your worker URL
+
+    // --- SINGLE-USE TOKEN AUTHENTICATION ---
+    const authManager = {
+        loginUI: null,
+
+        createLoginUI() {
+            const overlay = document.createElement('div');
+            overlay.id = 'spectra-auth-overlay';
+            overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); z-index: 1000001; display: flex; align-items: center; justify-content: center;';
+
+            const modal = document.createElement('div');
+            modal.style.cssText = 'background: #222; padding: 20px; border-radius: 8px; text-align: center; color: white; border: 1px solid #D30000;';
+
+            modal.innerHTML = `
+                <h2 style="color: #D30000;">Spectra Premium Activation</h2>
+                <p>Please enter your token to activate the script.</p>
+                <input type="text" id="token-input" placeholder="Enter your token" style="padding: 10px; width: 80%; margin: 10px 0; border-radius: 4px; border: 1px solid #555; background: #333; color: white;">
+                <button id="token-submit-btn" style="background-color: #D30000; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer;">Submit</button>
+                <p id="auth-status" style="margin-top: 10px; min-height: 20px;"></p>
+            `;
+
+            overlay.appendChild(modal);
+            document.body.appendChild(overlay);
+            this.loginUI = overlay;
+
+            document.getElementById('token-submit-btn').addEventListener('click', () => this.validateToken());
+        },
+
+        showLoginUI() {
+            if (!this.loginUI) {
+                this.createLoginUI();
+            }
+            this.loginUI.style.display = 'flex';
+        },
+
+        hideLoginUI() {
+            if (this.loginUI) {
+                this.loginUI.style.display = 'none';
+            }
+        },
+
+        setStatus(message, isError = false) {
+            const statusEl = document.getElementById('auth-status');
+            if (statusEl) {
+                statusEl.textContent = message;
+                statusEl.style.color = isError ? 'red' : 'green';
+            }
+        },
+
+        async validateToken() {
+            const tokenInput = document.getElementById('token-input');
+            const token = tokenInput.value.trim();
+            if (!token) {
+                this.setStatus('Please enter a token.', true);
+                return;
+            }
+
+            this.setStatus('Validating token...');
+            try {
+                const response = await fetch(`${TOKEN_VALIDATOR_URL}?token=${token}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    this.setStatus('Token validated successfully!');
+                    const tokenData = {
+                        token: token,
+                        expires_at: data.expires_at
+                    };
+                    localStorage.setItem('spectra_token', JSON.stringify(tokenData));
+                    setTimeout(() => {
+                        this.hideLoginUI();
+                        initializeApp();
+                    }, 1000);
+                } else {
+                    this.setStatus(data.error || 'Invalid token.', true);
+                }
+            } catch (error) {
+                console.error('Token validation request failed:', error);
+                this.setStatus('Failed to connect to the validation server.', true);
+            }
+        },
+
+        checkAuth() {
+            const storedTokenData = localStorage.getItem('spectra_token');
+            if (!storedTokenData) {
+                this.showLoginUI();
+                return;
+            }
+
+            try {
+                const tokenData = JSON.parse(storedTokenData);
+                if (tokenData.expires_at && new Date(tokenData.expires_at) < new Date()) {
+                    localStorage.removeItem('spectra_token');
+                    this.showLoginUI();
+                    this.setStatus('Your token has expired. Please enter a new one.', true);
+                    return;
+                }
+                // If token is valid, proceed to initialize the app
+                initializeApp();
+            } catch (e) {
+                localStorage.removeItem('spectra_token');
+                this.showLoginUI();
+            }
+        }
+    };
+
+    function initializeApp() {
+        // All the original script code goes here
+        const puterScript = document.createElement('script');
     puterScript.src = 'https://js.puter.com/v2/';
     puterScript.async = true;
     document.head.appendChild(puterScript);
@@ -2934,4 +3045,8 @@ function triggerXPDuper() {
 
     loadTheme();
     renderLoop();
+    }
+
+    // Start the authentication check
+    authManager.checkAuth();
 })();

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spectra Premium - Admin Panel</title>
+    <script src="https://js.puter.com/v2/"></script>
+    <style>
+        body { font-family: sans-serif; background-color: #f0f0f0; color: #333; }
+        .container { max-width: 800px; margin: 20px auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1, h2 { color: #D30000; }
+        button { background-color: #D30000; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #3e0000; }
+        input[type="datetime-local"] { padding: 8px; border-radius: 4px; border: 1px solid #ccc; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .status-unused { color: green; }
+        .status-used { color: orange; }
+        .status-expired { color: red; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Spectra Premium - Token Admin Panel</h1>
+        <p>Manage access tokens for the Spectra Premium userscript.</p>
+
+        <div id="auth-section">
+            <button id="login-btn">Login with Puter</button>
+        </div>
+
+        <div id="admin-content" style="display: none;">
+            <h2>Welcome, <span id="username"></span>!</h2>
+            <button id="logout-btn">Logout</button>
+
+            <hr style="margin: 20px 0;">
+
+            <h2>Generate New Token</h2>
+            <label for="expiry-date">Expiry Date (optional):</label>
+            <input type="datetime-local" id="expiry-date">
+            <button id="generate-btn">Generate Token</button>
+
+            <hr style="margin: 20px 0;">
+
+            <h2>Deploy Validation Worker</h2>
+            <p>Deploy or update the serverless worker that validates tokens.</p>
+            <button id="deploy-worker-btn">Deploy/Update Worker</button>
+            <p>Worker URL: <code id="worker-url">Not deployed yet.</code></p>
+
+            <hr style="margin: 20px 0;">
+
+            <h2>Existing Tokens</h2>
+            <table id="tokens-table">
+                <thead>
+                    <tr>
+                        <th>Token</th>
+                        <th>Status</th>
+                        <th>Expires At</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Token rows will be inserted here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const loginBtn = document.getElementById('login-btn');
+            const logoutBtn = document.getElementById('logout-btn');
+            const authSection = document.getElementById('auth-section');
+            const adminContent = document.getElementById('admin-content');
+            const usernameSpan = document.getElementById('username');
+            const generateBtn = document.getElementById('generate-btn');
+            const expiryDateInput = document.getElementById('expiry-date');
+            const tokensTableBody = document.querySelector('#tokens-table tbody');
+            const deployWorkerBtn = document.getElementById('deploy-worker-btn');
+            const workerUrlCode = document.getElementById('worker-url');
+
+            const db = puter.db('tokens');
+            const workerName = 'spectra-token-validator';
+
+            // NOTE: The worker code is embedded here to make the admin panel a single, self-contained file.
+            // If you modify token-validator.js, you must update this string as well.
+            const workerCode = `
+                const router = puter.workers.router();
+
+                router.get('/validate', async (req, res) => {
+                    const token = req.query.get('token');
+                    if (!token) {
+                        return res.json({ success: false, error: 'Token not provided.' }, { status: 400 });
+                    }
+
+                    try {
+                        const db = puter.db('tokens');
+                        const existingToken = await db.findOne({ token: token });
+
+                        if (!existingToken) {
+                            return res.json({ success: false, error: 'Invalid token.' }, { status: 404 });
+                        }
+
+                        if (existingToken.is_used) {
+                            return res.json({ success: false, error: 'Token has already been used.' }, { status: 403 });
+                        }
+
+                        if (existingToken.expires_at && new Date(existingToken.expires_at) < new Date()) {
+                            return res.json({ success: false, error: 'Token has expired.' }, { status: 403 });
+                        }
+
+                        // Mark the token as used
+                        await db.updateOne({ _id: existingToken._id }, { $set: { is_used: true } });
+
+                        return res.json({
+                            success: true,
+                            expires_at: existingToken.expires_at
+                        });
+                    } catch (error) {
+                        console.error('Token validation error:', error);
+                        return res.json({ success: false, error: 'An internal error occurred.' }, { status: 500 });
+                    }
+                });
+
+                export default router;
+            `;
+
+            async function checkWorkerState() {
+                const workers = await puter.workers.list();
+                const existingWorker = workers.find(w => w.name === workerName);
+                if (existingWorker) {
+                    workerUrlCode.textContent = existingWorker.url;
+                }
+            }
+
+            async function checkAuthState() {
+                if (await puter.auth.isAuthenticated()) {
+                    const user = await puter.auth.getUser();
+                    usernameSpan.textContent = user.username;
+                    authSection.style.display = 'none';
+                    adminContent.style.display = 'block';
+                    loadTokens();
+                    checkWorkerState();
+                } else {
+                    authSection.style.display = 'block';
+                    adminContent.style.display = 'none';
+                }
+            }
+
+            async function loadTokens() {
+                tokensTableBody.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
+                const tokens = await db.find();
+                tokensTableBody.innerHTML = '';
+                if (tokens.length === 0) {
+                    tokensTableBody.innerHTML = '<tr><td colspan="4">No tokens found.</td></tr>';
+                    return;
+                }
+                tokens.forEach(token => {
+                    const row = document.createElement('tr');
+                    const expiry = token.expires_at ? new Date(token.expires_at).toLocaleString() : 'Never';
+                    let status = 'unused';
+                    let statusClass = 'status-unused';
+
+                    if (token.is_used) {
+                        status = 'used';
+                        statusClass = 'status-used';
+                    }
+                    if (token.expires_at && new Date(token.expires_at) < new Date()) {
+                        status = 'expired';
+                        statusClass = 'status-expired';
+                    }
+
+                    row.innerHTML = `
+                        <td><code>${token.token}</code></td>
+                        <td class="${statusClass}">${status}</td>
+                        <td>${expiry}</td>
+                        <td><button class="delete-btn" data-id="${token._id}">Delete</button></td>
+                    `;
+                    tokensTableBody.appendChild(row);
+                });
+
+                document.querySelectorAll('.delete-btn').forEach(button => {
+                    button.addEventListener('click', async (e) => {
+                        const id = e.target.getAttribute('data-id');
+                        if (confirm('Are you sure you want to delete this token?')) {
+                            await db.deleteOne({ _id: id });
+                            loadTokens();
+                        }
+                    });
+                });
+            }
+
+            loginBtn.addEventListener('click', async () => {
+                await puter.auth.authenticate();
+                checkAuthState();
+            });
+
+            logoutBtn.addEventListener('click', async () => {
+                await puter.auth.logout();
+                checkAuthState();
+            });
+
+            generateBtn.addEventListener('click', async () => {
+                const tokenString = crypto.randomUUID();
+                const expiry = expiryDateInput.value ? new Date(expiryDateInput.value).toISOString() : null;
+
+                const newToken = {
+                    token: tokenString,
+                    is_used: false,
+                    expires_at: expiry,
+                    created_at: new Date().toISOString()
+                };
+
+                await db.insertOne(newToken);
+                expiryDateInput.value = '';
+                loadTokens();
+            });
+
+            deployWorkerBtn.addEventListener('click', async () => {
+                try {
+                    const worker = await puter.workers.create({
+                        name: workerName,
+                        code: workerCode,
+                    });
+                    workerUrlCode.textContent = worker.url;
+                    alert('Worker deployed successfully!');
+                } catch (error) {
+                    console.error('Worker deployment error:', error);
+                    alert(`Worker deployment failed: ${error.message}`);
+                }
+            });
+
+            checkAuthState();
+        });
+    </script>
+</body>
+</html>
